@@ -63,6 +63,7 @@ class ParameterDependent(FileBacked):
                     contractables[c](mu, contractables) if isinstance(c, str) else c
                     for c in contract
                 )
+            assert all(not isinstance(c, str) for c in contract)
             retval = self.evaluate(case, mu, contract, **kwargs)
 
         if isinstance(retval, COOSparse):

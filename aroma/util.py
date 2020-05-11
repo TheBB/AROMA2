@@ -1,7 +1,10 @@
+from functools import partial
+from collections import namedtuple
 from itertools import chain
 
 import filebacked
 import numpy as np
+from numpy import newaxis as _
 import scipy.sparse as sparse
 
 
@@ -31,7 +34,7 @@ def broadcast_shapes(args):
     return tuple(result)
 
 
-def apply_contraction(obj, contract):
+def apply_contraction(obj, names, contract):
     """Apply a contraction over a multidimensional array-like object.
 
     The contraction must be a tuple of either None (no contraction) or
@@ -40,8 +43,10 @@ def apply_contraction(obj, contract):
     """
 
     axes = []
-    for i, cont in enumerate(contract):
+    newnames = []
+    for i, (name, cont) in enumerate(zip(names, contract)):
         if cont is None:
+            newnames.append(name)
             continue
         assert cont.ndim == 1
         for __ in range(i):
@@ -50,7 +55,7 @@ def apply_contraction(obj, contract):
             cont = cont[...,_]
         obj = obj * cont
         axes.append(i)
-    return obj.sum(tuple(axes))
+    return obj.sum(tuple(axes)), tuple(newnames)
 
 
 def tuple_union(tuples):
@@ -85,6 +90,64 @@ class StringlyFileBacked(filebacked.FileBackedBase):
         code = filebacked.read(self.__filebacked_group__[classname], str, **kwargs)
         obj = eval(code, {}, {classname: self.__class__})
         self.__dict__.update(obj.__dict__)
+
+
+class NamedBlock:
+
+    def __init__(self, names, obj):
+        self.names = names
+        self.obj = obj
+
+    @property
+    def T(self):
+        return NamedBlock(self.names[::-1], self.obj.T)
+
+
+class NamedBlocks:
+
+    def __init__(self, names, fill=0.0):
+        self.fill = fill
+        self.name_to_index = [
+            {name: i for i, (name, _) in enumerate(namespec)}
+            for namespec in names
+        ]
+        self.index_to_size = [
+            [length for (_, length) in namespec]
+            for namespec in names
+        ]
+
+        s = tuple(len(sizes) for sizes in self.index_to_size)
+        self.blocks = np.zeros(tuple(len(sizes) for sizes in self.index_to_size), dtype=object)
+
+    def __getitem__(self, key):
+        index = tuple(self.name_to_index[i][k] for i, k in enumerate(key))
+        return self.blocks[index]
+
+    def __setitem__(self, key, value):
+        index = tuple(self.name_to_index[i][k] for i, k in enumerate(key))
+        self.blocks[index] = value
+
+    def __iadd__(self, block):
+        assert isinstance(block, NamedBlock)
+        self[block.names] += block.obj
+        return self
+
+    def substitute_zeros(self, func):
+        for index, v in np.ndenumerate(self.blocks):
+            if isinstance(v, int) and v == 0:
+                shape = tuple(self.index_to_size[i][j] for i, j in enumerate(index))
+                self.blocks[index] = func(shape)
+
+    def realize(self):
+        # Sparse path
+        if any(isinstance(elt, sparse.spmatrix) for elt in self.blocks.flat):
+            assert self.fill == 0
+            self.substitute_zeros(sparse.coo_matrix)
+            return sparse.bmat(self.blocks, format='csr')
+
+        # Dense path
+        self.substitute_zeros(partial(np.full, fill_value=self.fill))
+        return np.block(self.blocks.tolist())
 
 
 class COOSparse(sparse.coo_matrix):

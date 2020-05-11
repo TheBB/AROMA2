@@ -1,19 +1,11 @@
+from typing import Tuple
+
+import numpy as np
 from nutils import matrix, function as fn
 
 from aroma.affine import ParameterDependent, Basis
 from aroma.case import HifiCase
-from aroma.util import apply_contraction, dependency_union, COOSparse
-
-
-class SparseBackend(matrix.Backend):
-
-    def __init__(self, shape, indices):
-        self.shape = shape
-        self.master = indices
-
-    def assemble(self, data, index, shape):
-        index = tuple(i if m is None else m[i] for m, i in zip(self.master, index))
-        return COOSparse((data, index), shape=self.shape)
+from aroma.util import apply_contraction, dependency_union, NamedBlock
 
 
 class NutilsBasis(Basis):
@@ -26,7 +18,8 @@ class NutilsBasis(Basis):
         self.basis = basis
 
     def evaluate(self, case, mu, contract, **kwargs):
-        return apply_contraction(self.basis, contract)
+        obj, _ = apply_contraction(self.basis, (self.name,), contract)
+        return obj
 
 
 class NutilsCase(HifiCase):
@@ -38,55 +31,82 @@ class NutilsCase(HifiCase):
         super().__init__(name)
         self.domain = domain
 
-    def sparse_integrate(self, itg, preshape):
-        shape = tuple(self.ndofs if isinstance(s, str) else s for s in preshape)
-        indices = tuple(self.bases[s].indices if isinstance(s, str) else None for s in preshape)
-        with SparseBackend(shape, indices):
-            return self.domain.integrate(itg, ischeme='gauss9')
+    def sparse_integrate(self, itg, basisnames):
+        with matrix.Scipy():
+            retval = self.domain.integrate(itg, ischeme='gauss9')
+        if isinstance(retval, matrix.Matrix):
+            retval = retval.core
+        return NamedBlock(basisnames, retval)
+
+    def project_function(self, func, basisname, mu=None):
+        if mu is None:
+            mu = self.parameter()
+        geom = self.geometry(mu)
+        basis = self.basis(basisname, mu)
+        with matrix.Scipy():
+            lift = self.domain.project(func, onto=basis, geometry=geom, ischeme='gauss9')
+        return NamedBlock(basisname, lift)
+
+    def constrain(self, basisname, *boundaries, component=None, mu=None):
+        if len(boundaries) == 1 and isinstance(boundaries[0], np.ndarray):
+            return super().constrain(basisname, *boundaries)
+
+        if mu is None:
+            mu = self.parameter()
+        boundary = self.domain.boundary[','.join(boundaries)]
+
+        geom = self.geometry(mu)
+        basis = self.basis(basisname, mu)
+        zero = np.zeros(basis.shape[1:])
+        if component is not None:
+            basis = basis[...,component]
+            zero = zero[...,component]
+
+        with matrix.Scipy():
+            projected = boundary.project(zero, onto=basis, geometry=geom, ischeme='gauss2')
+        super().constrain(basisname, projected)
 
 
-class Laplacian(ParameterDependent):
+class NutilsIntegrand(ParameterDependent):
+    """Superclass for Nutils integrand objects."""
+
+    basisnames: Tuple[str, ...]
+
+    def __init__(self, case, basisnames, **kwargs):
+        bases = [case.bases[name] for name in basisnames]
+        shape = tuple(len(basis) for basis in bases)
+        dependencies = dependency_union(case.geometry_func, *bases)
+        super().__init__(shape, dependencies, **kwargs)
+        self.basisnames = basisnames
+
+    def contract_and_integrate(self, case, itg, contract, geom):
+        itg, names = apply_contraction(itg, self.basisnames, contract)
+        return case.sparse_integrate(itg * fn.J(geom), names)
+
+
+class Laplacian(NutilsIntegrand):
     """Nutils Laplacian matrix."""
 
-    basisname: str
-
     def __init__(self, case, basisname, **kwargs):
-        basis = case.bases[basisname]
-        shape = (len(basis),) * 2
-        dependencies = dependency_union(basis, case.geometry_func)
-        super().__init__(shape, dependencies, **kwargs)
-        self.basisname = basisname
+        super().__init__(case, (basisname,) * 2, **kwargs)
 
     def evaluate(self, case, mu, contract, **kwargs):
         geom = case.geometry(mu)
-        basis = case.basis(self.basisname, mu)
-
+        basis = case.basis(self.basisnames[0], mu)
         itg = fn.outer(basis.grad(geom))
         sum_dims = list(range(2, itg.ndim))
-        itg = apply_contraction(itg.sum(sum_dims), contract)
-        return case.sparse_integrate(itg * fn.J(geom), (self.basisname,) * 2)
+        return self.contract_and_integrate(case, itg.sum(sum_dims), contract, geom)
 
 
-class Divergence(ParameterDependent):
+class Divergence(NutilsIntegrand):
     """Nutils divergence matrix."""
 
-    vbasisname: str
-    pbasisname: str
-
     def __init__(self, case, vbasisname, pbasisname, **kwargs):
-        vbasis = case.bases[vbasisname]
-        pbasis = case.bases[pbasisname]
-        shape = (len(vbasis), len(pbasis))
-        dependencies = dependency_union(vbasis, pbasis, case.geometry_func)
-        super().__init__(shape, dependencies, **kwargs)
-        self.vbasisname = vbasisname
-        self.pbasisname = pbasisname
+        super().__init__(case, (vbasisname, pbasisname), **kwargs)
 
     def evaluate(self, case, mu, contract, **kwargs):
         geom = case.geometry(mu)
-        vbasis = case.basis(self.vbasisname, mu)
-        pbasis = case.basis(self.pbasisname, mu)
-
+        vbasis = case.basis(self.basisnames[0], mu)
+        pbasis = case.basis(self.basisnames[1], mu)
         itg = -fn.outer(vbasis.div(geom), pbasis)
-        itg = apply_contraction(itg, contract)
-        return case.sparse_integrate(itg * fn.J(geom), (self.vbasisname, self.pbasisname))
+        return self.contract_and_integrate(case, itg, contract, geom)

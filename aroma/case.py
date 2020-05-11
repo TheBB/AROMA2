@@ -7,6 +7,7 @@ import numpy as np
 
 from aroma.affine import ParameterDependent, Basis
 from aroma.mufunc import MuFunc
+from aroma.util import NamedBlocks
 
 
 class Parameter(FileBacked):
@@ -74,6 +75,7 @@ class Case(FileBacked):
     bases: Bases
     geometry_func: ParameterDependent
     functions: Dict[str, ParameterDependent]
+    constraints: np.ndarray
 
     def __init__(self, name):
         super().__init__()
@@ -88,6 +90,15 @@ class Case(FileBacked):
     def basis(self, name, mu, **kwargs):
         return self.bases[name](self, mu, **kwargs)
 
+    def block_assembler(self, *basisnames, repeat=None, **kwargs):
+        if repeat is not None:
+            basisnames = (basisnames[0],) * repeat
+        namespec = [
+            [(name, len(self.bases[name])) for name in namespec]
+            for namespec in basisnames
+        ]
+        return NamedBlocks(namespec, **kwargs)
+
     @property
     def ndofs(self):
         return sum(len(basis) for basis in self.bases.values())
@@ -96,9 +107,32 @@ class Case(FileBacked):
     def geometry(self):
         return partial(self.geometry_func, self)
 
+    @property
+    def cons(self):
+        try:
+            return self.constraints
+        except AttributeError:
+            self.constraints = np.full((self.ndofs,), np.nan)
+            return self.constraints
+
+    @cons.setter
+    def cons(self, value):
+        self.constraints = value
+
+    def constrain(self, basisname, vector):
+        cons = self.cons
+        I = self.bases[basisname].indices
+        cons[I] = np.where(np.isnan(cons[I]), vector, cons[I])
+
     @geometry.setter
     def geometry(self, value):
         self.geometry_func = value
+
+    def __contains__(self, name):
+        for mapping in self.function_search_path():
+            if name in mapping:
+                return True
+        return False
 
     @lru_cache
     def __getitem__(self, name):
