@@ -3,8 +3,9 @@ from itertools import chain
 from typing import Optional, Dict
 
 from filebacked import FileBacked, FileBackedDict
+import numpy as np
 
-from aroma.affine import ParameterDependent, ParameterContainer
+from aroma.affine import ParameterDependent, Basis
 from aroma.mufunc import MuFunc
 
 
@@ -52,23 +53,44 @@ class Parameters(FileBackedDict[str, Parameter]):
         return retval
 
 
+class Bases(FileBackedDict[str, Basis]):
+
+    def recompute(self):
+        start = 0
+        for basis in self.values():
+            basis.start = start
+            start += len(basis)
+
+    def __setitem__(self, key, value):
+        value.name = key
+        super().__setitem__(key, value)
+        self.recompute()
+
+
 class Case(FileBacked):
 
     name: str
     parameters: Parameters
+    bases: Bases
     geometry_func: ParameterDependent
-    lhs: ParameterContainer
-    rhs: ParameterContainer
+    functions: Dict[str, ParameterDependent]
 
     def __init__(self, name):
         super().__init__()
         self.name = name
         self.parameters = Parameters()
-        self.lhs = ParameterContainer()
-        self.rhs = ParameterContainer()
+        self.bases = Bases()
+        self.functions = dict()
 
     def parameter(self, *args, **kwargs):
         return self.parameters.parameter(*args, **kwargs)
+
+    def basis(self, name, mu, **kwargs):
+        return self.bases[name](self, mu, **kwargs)
+
+    @property
+    def ndofs(self):
+        return sum(len(basis) for basis in self.bases.values())
 
     @property
     def geometry(self):
@@ -85,8 +107,11 @@ class Case(FileBacked):
                 return partial(mapping[name], self)
         raise KeyError(name)
 
+    def __setitem__(self, name, value):
+        self.functions[name] = value
+
     def function_search_path(self):
-        return (self.lhs, self.rhs)
+        return (self.functions,)
 
 
 class HifiCase(Case):
@@ -98,13 +123,4 @@ class HifiCase(Case):
         self.contractables = dict()
 
     def function_search_path(self):
-        return chain(super()._func_search(), (self.contractables,))
-
-
-class NutilsCase(HifiCase):
-
-    domain: object
-
-    def __init__(self, name, domain):
-        super().__init__(name)
-        self.domain = domain
+        return chain(super().function_search_path(), (self.contractables,))
