@@ -1,6 +1,6 @@
 import numpy as np
 
-from aroma.util import StringlyFileBacked, SCALARS
+from aroma.util import StringlyFileBacked
 
 
 _mufuncs = {
@@ -18,8 +18,8 @@ def _wrap(func):
     """Helper decorator for wrapping arguments as MuFunc objects."""
 
     def ret(*args):
-        allowed = (MuFunc, str) + SCALARS
-        if not all(isinstance(arg, allowed) for arg in args):
+        allowed = (MuFunc, str)
+        if not all(isinstance(arg, allowed) or np.isscalar(arg) for arg in args):
             return NotImplemented
         new_args = [arg if isinstance(arg, MuFunc) else MuFunc(arg) for arg in args]
         return func(*new_args)

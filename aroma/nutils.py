@@ -6,7 +6,16 @@ from nutils import matrix, function as fn
 
 from aroma.affine import ParameterDependent, Basis
 from aroma.case import HifiCase
-from aroma.util import apply_contraction, dependency_union, FlexArray
+from aroma.util import contract_helper, dependency_union, FlexArray
+
+
+@contract_helper.register(fn.Array)
+def _(obj, contract, axis):
+    newshape = [1] * obj.ndim
+    newshape[axis] = len(contract)
+    contract = contract.reshape(newshape)
+    obj = (obj * contract).sum((axis,))
+    return obj
 
 
 class NutilsBasis(Basis):
@@ -22,8 +31,10 @@ class NutilsBasis(Basis):
         return len(self.basis)
 
     def evaluate(self, case, mu, contract, **kwargs):
-        obj, _ = apply_contraction(self.basis, contract, names=(self.name,))
-        return obj
+        c, *_ = contract
+        if c is not None:
+            return self.basis.dot(c[self.name])
+        return self.basis
 
 
 class NutilsCase(HifiCase):
@@ -92,7 +103,9 @@ class NutilsIntegrand(ParameterDependent):
         self.basisnames = basisnames
 
     def contract_and_integrate(self, case, itg, contract, geom):
-        itg, names = apply_contraction(itg, contract, names=self.basisnames)
+        itg = FlexArray((self.basisnames, itg))
+        itg = itg.contract_many(contract)
+        itg, names = itg.only()
         return case.sparse_integrate(itg * fn.J(geom), names)
 
 

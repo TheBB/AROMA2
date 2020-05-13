@@ -4,7 +4,7 @@ from typing import Dict, Tuple, Optional
 from filebacked import FileBacked
 import numpy as np
 
-from aroma.util import broadcast_shapes, apply_contraction, dependency_union
+from aroma.util import broadcast_shapes, dependency_union
 from aroma.mufunc import MuFunc
 
 
@@ -85,8 +85,7 @@ class ParameterConstant(ParameterDependent):
         self.obj = obj
 
     def evaluate(self, case, mu, contract, **kwargs):
-        return apply_contraction(self.obj, contract)
-
+        return self.obj.contract_many(contract)
 
 
 class ParameterLambda(ParameterDependent):

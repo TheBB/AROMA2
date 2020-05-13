@@ -32,7 +32,7 @@ def solve(fmx, frhs, cons, names, solver='direct', **kwargs):
     return fmx.compatible((names,), retval)
 
 
-def stokes(case, mu, vlift='lift/v'):
+def stokes(case, mu, lift='lift'):
     assert 'laplacian' in case
     assert 'divergence' in case
 
@@ -43,7 +43,7 @@ def stokes(case, mu, vlift='lift/v'):
     mx += divergence.T
 
     rhs = FlexArray(ndim=1)
-    rhs -= case['laplacian'](mu, contract=(None, vlift))
-    rhs -= case['divergence'](mu, contract=(vlift, None))
+    rhs -= case['laplacian'](mu, contract=(None, lift))
+    rhs -= case['divergence'](mu, contract=(lift, None))
 
     return solve(mx, rhs, case.cons, ('v', 'p'))

@@ -1,5 +1,5 @@
 from collections import namedtuple
-from functools import partial
+from functools import partial, singledispatch
 from itertools import chain, product
 from operator import attrgetter
 from typing import List, Dict
@@ -8,12 +8,6 @@ import filebacked
 import numpy as np
 from numpy import newaxis as _
 import scipy.sparse
-
-
-SCALARS = (
-    float, np.float, np.float128, np.float64, np.float32, np.float16,
-    int, np.int, np.int64, np.int32, np.int16, np.int8, np.int0,
-)
 
 
 def broadcast_shapes(args):
@@ -36,33 +30,24 @@ def broadcast_shapes(args):
     return tuple(result)
 
 
-def apply_contraction(obj, contract, names=None):
-    """Apply a contraction over a multidimensional array-like object.
+@singledispatch
+def contract_helper(obj, contract, axis):
+    raise NotImplementedError
 
-    The contraction must be a tuple of either None (no contraction) or
-    a vector with the correct length, for each dimension of the
-    object.
-    """
+@contract_helper.register(np.ndarray)
+def _(obj, contract, axis):
+    newshape = [1] * obj.ndim
+    newshape[axis] = len(contract)
+    contract = contract.reshape(newshape)
+    obj = (obj * contract).sum((axis,))
+    return obj
 
-    axes = []
-    for i, cont in enumerate(contract):
-        if cont is None:
-            continue
-        assert cont.ndim == 1
-        for __ in range(i):
-            cont = cont[_,...]
-        while cont.ndim < obj.ndim:
-            cont = cont[...,_]
-        obj = obj * cont
-        axes.append(i)
-
-    obj = obj.sum(tuple(axes))
-
-    if names is not None:
-        newnames = tuple(name for name, cont in zip(names, contract) if cont is None)
-        return obj, newnames
-    else:
-        return obj
+@contract_helper.register(scipy.sparse.spmatrix)
+def _(obj, contract, axis):
+    if axis == 1:
+        return obj @ contract
+    elif axis == 0:
+        return contract @ obj.T
 
 
 def tuple_union(tuples):
@@ -108,6 +93,27 @@ class ZeroSentinel:
     def __iadd__(self, other):
         return other
 
+    def __add__(self, other):
+        return other
+
+    def __isub__(self, other):
+        return -other
+
+    def __sub__(self, other):
+        return -other
+
+    def __mul__(self, other):
+        return self
+
+    def __imul__(self, other):
+        return self
+
+    def __div__(self, other):
+        return self
+
+    def __idiv__(self, other):
+        return self
+
 zero_sentinel = ZeroSentinel()
 
 
@@ -152,6 +158,12 @@ class FlexArray:
         newobj.axis_indices = indices
         return newobj
 
+    def copy(self):
+        newobj = FlexArray(ndim=self.ndim)
+        for index, block in self.items():
+            newobj.add_component(index, block)
+        return newobj
+
     def compatible(self, blocknames, array):
         indexranges = []
         for names in blocknames:
@@ -183,6 +195,11 @@ class FlexArray:
         newindices = [indices.copy() for indices in self.axis_indices[::-1]]
         return type(self).raw(newblocks, newsizes, newindices)
 
+    def only(self):
+        assert self.blocks.size == 1
+        index = tuple(next(iter(indices.keys())) for indices in self.axis_indices)
+        return self.blocks.flat[0], index
+
     def __getitem__(self, names):
         if isinstance(names, str):
             names = (names,)
@@ -190,6 +207,15 @@ class FlexArray:
         retval = self.blocks[tuple(index)]
         assert retval is not zero_sentinel
         return retval
+
+    def __add__(self, other):
+        if not isinstance(other, FlexArray):
+            return NotImplemented
+        assert self.ndim == other.ndim
+        newobj = FlexArray(ndim=self.ndim)
+        newobj += self
+        newobj += other
+        return newobj
 
     def __iadd__(self, other):
         if not isinstance(other, FlexArray):
@@ -206,6 +232,13 @@ class FlexArray:
         for name, value in other.items():
             self.add_component(name, -value)
         return self
+
+    def __mul__(self, other):
+        if np.isscalar(other):
+            newobj = self.copy()
+            newobj.blocks *= other
+            return newobj
+        assert False
 
     def items(self):
         """Iterate over blocks by index and value."""
@@ -239,6 +272,23 @@ class FlexArray:
 
         # We know the index, so just add it normally
         self.blocks[tuple(num_index)] += value
+
+    def contract(self, contract, axis):
+        if contract is None:
+            return self
+        newobj = FlexArray(ndim=self.ndim-1)
+        for index, block in self.items():
+            block = contract_helper(block, contract[index[axis]], axis)
+            newindex = index[:axis] + index[axis+1:]
+            newobj.add_component(newindex, block)
+        return newobj
+
+    def contract_many(self, contract):
+        retval = self
+        for i, c in enumerate(reversed(contract)):
+            axis = self.ndim - i - 1
+            retval = retval.contract(c, axis)
+        return retval
 
     def realize(self, *blocks, lengths=None, sparse=None):
         """Realize this block array as a true numpy array or scipy matrix."""
