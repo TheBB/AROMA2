@@ -148,31 +148,64 @@ class FlexArray:
 
     @classmethod
     def vector(cls, name, value):
+        """Simplified constructor for a single-block vector."""
         return cls(((name,), value))
 
     @classmethod
+    def single(cls, names, value):
+        """Simplified constructor for a single-block array."""
+        return cls((names, value))
+
+    @classmethod
     def raw(cls, blocks, sizes, indices):
+        """Internal-use constructor that creates a new FlexArray with direct
+        access to the internal data structure.
+        """
         newobj = cls.__new__(cls)
         newobj.blocks = blocks
         newobj.sizes = sizes
         newobj.axis_indices = indices
         return newobj
 
-    def copy(self):
+    @property
+    def ndim(self):
+        return self.blocks.ndim
+
+    def copy(self, deep=True):
+        """Create a copy of this FlexArray object. If 'deep' is true, the
+        blocks will also be copied.
+        """
+        if deep:
+            copier = lambda x: x.copy() if hasattr(x, 'copy') else x
+        else:
+            copier = lambda x: x
         newobj = FlexArray(ndim=self.ndim)
         for index, block in self.items():
-            newobj.add_component(index, block)
+            newobj.add_component(index, copier(block))
         return newobj
 
-    def compatible(self, blocknames, array):
-        indexranges = []
-        for names in blocknames:
-            previous, ranges = 0, []
-            for name in names:
-                ranges.append(np.arange(previous, previous + self.sizes[name]))
-                previous += self.sizes[name]
-            indexranges.append(ranges)
+    def ranges(self, names):
+        """Utility method for converting an ordered list of names to a list of
+        indexing ranges.
+        """
+        previous, ranges = 0, []
+        for name in names:
+            ranges.append(np.arange(previous, previous + self.sizes[name]))
+            previous += self.sizes[name]
+        return ranges
 
+    def compatible(self, blocknames, array):
+        """Create a new FlexArray representation of the given array with the
+        given block names. The new FlexArray is compatible with
+        'self', in the sense that blocks with the same name must have
+        the same length, and that after
+
+            temp = flex.compatible(names, old)
+            new = temp.realize(names)
+
+        then 'new' and 'old' should be equal.
+        """
+        indexranges = [self.ranges(names) for names in blocknames]
         blockshape = tuple(len(names) for names in blocknames)
         newblocks = np.full(blockshape, zero_sentinel, dtype=object)
         for blockindex in np.ndindex(newblocks.shape):
@@ -183,11 +216,8 @@ class FlexArray:
         return type(self).raw(newblocks, self.sizes.copy(), newindices)
 
     @property
-    def ndim(self):
-        return self.blocks.ndim
-
-    @property
     def T(self):
+        """Return the transposed array."""
         if self.ndim == 1:
             return self
         newblocks = np.vectorize(attrgetter('T'))(self.blocks.T)
@@ -196,11 +226,15 @@ class FlexArray:
         return type(self).raw(newblocks, newsizes, newindices)
 
     def only(self):
+        """Return the index tuple and block contents, asserting that the array
+        consists only of a single block.
+        """
         assert self.blocks.size == 1
         index = tuple(next(iter(indices.keys())) for indices in self.axis_indices)
         return self.blocks.flat[0], index
 
     def __getitem__(self, names):
+        """Get a block by index."""
         if isinstance(names, str):
             names = (names,)
         index = (indices[name] for name, indices in zip(names, self.axis_indices))
@@ -208,40 +242,25 @@ class FlexArray:
         assert retval is not zero_sentinel
         return retval
 
-    def __add__(self, other):
-        if not isinstance(other, FlexArray):
-            return NotImplemented
-        assert self.ndim == other.ndim
-        newobj = FlexArray(ndim=self.ndim)
-        newobj += self
-        newobj += other
-        return newobj
+    def __setitem__(self, names, value):
+        """Set a block by index."""
+        if isinstance(names, str):
+            names = (names,)
+        index = (indices[name] for name, indices in zip(names, self.axis_indices))
+        self.blocks[tuple(index)] = value
 
-    def __iadd__(self, other):
-        if not isinstance(other, FlexArray):
-            return NotImplemented
-        assert self.ndim == other.ndim
-        for name, value in other.items():
-            self.add_component(name, value)
-        return self
+    def keys(self):
+        """Iterate over nonzero blocks by index."""
+        for name, _ in self.items():
+            yield name
 
-    def __isub__(self, other):
-        if not isinstance(other, FlexArray):
-            return NotImplemented
-        assert self.ndim == other.ndim
-        for name, value in other.items():
-            self.add_component(name, -value)
-        return self
-
-    def __mul__(self, other):
-        if np.isscalar(other):
-            newobj = self.copy()
-            newobj.blocks *= other
-            return newobj
-        assert False
+    def values(self):
+        """Iterate over nonzero blocks by value."""
+        for _, value in self.items():
+            yield value
 
     def items(self):
-        """Iterate over blocks by index and value."""
+        """Iterate over nonzero blocks by index and value."""
         names = [indices.keys() for indices in self.axis_indices]
         nums = [indices.values() for indices in self.axis_indices]
         for name, index in zip(product(*names), product(*nums)):
@@ -250,6 +269,11 @@ class FlexArray:
                 yield name, value
 
     def add_component(self, index, value):
+        """Add a new block to this array.  The index may be inexistent, in
+        which case the internal data structures will be expanded, or
+        refer to an existing block, in which case it will be added.
+        """
+
         assert len(index) == self.ndim
 
         # Calculate the numerical block index axis-by-axis
@@ -274,8 +298,12 @@ class FlexArray:
         self.blocks[tuple(num_index)] += value
 
     def contract(self, contract, axis):
+        """Contract the array by a single axis. The 'contract' argument should
+        be either None or a one-dimensional FlexArray.
+        """
         if contract is None:
             return self
+        assert contract.ndim == 1
         newobj = FlexArray(ndim=self.ndim-1)
         for index, block in self.items():
             block = contract_helper(block, contract[index[axis]], axis)
@@ -284,14 +312,30 @@ class FlexArray:
         return newobj
 
     def contract_many(self, contract):
-        retval = self
+        """Contract the array by multiple axes. The 'contract' argument must
+        be a tuple of one-dimensional FlexArrays or None.
+        """
+        assert len(contract) == self.ndim
+        retval = self.copy()
         for i, c in enumerate(reversed(contract)):
             axis = self.ndim - i - 1
             retval = retval.contract(c, axis)
         return retval
 
     def realize(self, *blocks, lengths=None, sparse=None):
-        """Realize this block array as a true numpy array or scipy matrix."""
+        """Realize this block array as a true numpy array or scipy matrix,
+        according to the ordering given by 'blocks'.
+
+        If lengths is given, it should be a dictionary-like object
+        mapping block name to size, verifying that the result is as
+        expected.
+
+        The 'sparse' parameter may be either True or a recognized
+        Scipy sparsity format, False (returns a dense matrix) or None,
+        in which case the sparsity of the returned object will be
+        heuristically determined.
+        """
+
         assert len(blocks) == self.ndim
 
         # If 'sparse' is not explicitly given, and we have a
@@ -331,3 +375,67 @@ class FlexArray:
         if sparse:
             return scipy.sparse.bmat(reordered_blocks, format=sparse)
         return np.block(reordered_blocks.tolist())
+
+    def __add__(self, other):
+        newobj = self.copy()
+        newobj += other
+        return newobj
+
+    def __iadd__(self, other):
+        if np.isscalar(other):
+            self.blocks += other
+            return self
+        if not isinstance(other, FlexArray):
+            return NotImplemented
+        assert self.ndim == other.ndim
+        for name, value in other.items():
+            self.add_component(name, value)
+        return self
+
+    def __sub__(self, other):
+        newobj = self.copy()
+        newobj -= other
+        return newobj
+
+    def __isub__(self, other):
+        if np.isscalar(other):
+            self.blocks -= other
+            return self
+        if not isinstance(other, FlexArray):
+            return NotImplemented
+        assert self.ndim == other.ndim
+        for name, value in other.items():
+            self.add_component(name, -value)
+        return self
+
+    def __mul__(self, other):
+        newobj = self.copy()
+        newobj *= other
+        return newobj
+
+    def __imul__(self, other):
+        if np.isscalar(other):
+            self.blocks *= other
+            return self
+        if not isinstance(other, FlexArray):
+            return NotImplemented
+        assert self.ndim == other.ndim
+        common_names = set(self.keys()) & set(other.keys())
+        for name in self.keys():
+            if name not in common_names:
+                self[name] = zero_sentinel
+        for name, value in other.keys():
+            if name in common_names:
+                self[name] *= value
+        self.sizes = {**self.sizes, **other.sizes}
+        return self
+
+    def __div__(self, other):
+        newobj = self.copy()
+        newobj /= other
+        return newobj
+
+    def __idiv__(self, other):
+        assert np.isscalar(other)
+        self.blocks *= other
+        return

@@ -60,7 +60,7 @@ class NutilsCase(HifiCase):
             retval = self.domain.integrate(itg, ischeme='gauss9')
         if isinstance(retval, matrix.Matrix):
             retval = retval.core
-        return FlexArray((basisnames, retval))
+        return FlexArray.single(basisnames, retval)
 
     def project_function(self, func, basisname, mu=None):
         if mu is None:
@@ -103,7 +103,7 @@ class NutilsIntegrand(ParameterDependent):
         self.basisnames = basisnames
 
     def contract_and_integrate(self, case, itg, contract, geom):
-        itg = FlexArray((self.basisnames, itg))
+        itg = FlexArray.single(self.basisnames, itg)
         itg = itg.contract_many(contract)
         itg, names = itg.only()
         return case.sparse_integrate(itg * fn.J(geom), names)
