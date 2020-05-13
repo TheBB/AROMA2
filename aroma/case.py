@@ -5,9 +5,9 @@ from typing import Optional, Dict
 from filebacked import FileBacked, FileBackedDict
 import numpy as np
 
-from aroma.affine import ParameterDependent, Basis
+from aroma.affine import ParameterDependent, ParameterContractable, Basis
 from aroma.mufunc import MuFunc
-from aroma.util import NamedBlocks
+from aroma.util import FlexArray
 
 
 class Parameter(FileBacked):
@@ -73,7 +73,6 @@ class Case(FileBacked):
     name: str
     parameters: Parameters
     bases: Bases
-    geometry_func: ParameterDependent
     functions: Dict[str, ParameterDependent]
     constraints: np.ndarray
 
@@ -90,22 +89,9 @@ class Case(FileBacked):
     def basis(self, name, mu, **kwargs):
         return self.bases[name](self, mu, **kwargs)
 
-    def block_assembler(self, *basisnames, repeat=None, **kwargs):
-        if repeat is not None:
-            basisnames = (basisnames[0],) * repeat
-        namespec = [
-            [(name, len(self.bases[name])) for name in namespec]
-            for namespec in basisnames
-        ]
-        return NamedBlocks(namespec, **kwargs)
-
     @property
     def ndofs(self):
         return sum(len(basis) for basis in self.bases.values())
-
-    @property
-    def geometry(self):
-        return partial(self.geometry_func, self)
 
     @property
     def cons(self):
@@ -124,37 +110,28 @@ class Case(FileBacked):
         I = self.bases[basisname].indices
         cons[I] = np.where(np.isnan(cons[I]), vector, cons[I])
 
-    @geometry.setter
-    def geometry(self, value):
-        self.geometry_func = value
-
     def __contains__(self, name):
-        for mapping in self.function_search_path():
-            if name in mapping:
-                return True
-        return False
+        return name in self.functions
 
     @lru_cache
     def __getitem__(self, name):
-        for mapping in self.function_search_path():
-            if name in mapping:
-                return partial(mapping[name], self)
-        raise KeyError(name)
+        return partial(self.functions[name], self)
 
     def __setitem__(self, name, value):
         self.functions[name] = value
 
-    def function_search_path(self):
-        return (self.functions,)
-
 
 class HifiCase(Case):
 
-    contractables: Dict[str, ParameterDependent]
+    contractables: Dict[str, ParameterContractable]
 
     def __init__(self, name):
         super().__init__(name)
         self.contractables = dict()
+        self.contractables['lift'] = ParameterContractable()
 
-    def function_search_path(self):
-        return chain(super().function_search_path(), (self.contractables,))
+    def contractable(self, path, mu):
+        func = self.contractables
+        for component in path.split('/'):
+            func = func[component]
+        return func(self, mu)

@@ -1,3 +1,4 @@
+from functools import partial
 from typing import Tuple
 
 import numpy as np
@@ -5,7 +6,7 @@ from nutils import matrix, function as fn
 
 from aroma.affine import ParameterDependent, Basis
 from aroma.case import HifiCase
-from aroma.util import apply_contraction, dependency_union, NamedBlock
+from aroma.util import apply_contraction, dependency_union, FlexArray
 
 
 class NutilsBasis(Basis):
@@ -14,11 +15,14 @@ class NutilsBasis(Basis):
     basis: object
 
     def __init__(self, basis):
-        super().__init__(shape=(basis.shape))
+        super().__init__(basis.ndim)
         self.basis = basis
 
+    def __len__(self):
+        return len(self.basis)
+
     def evaluate(self, case, mu, contract, **kwargs):
-        obj, _ = apply_contraction(self.basis, (self.name,), contract)
+        obj, _ = apply_contraction(self.basis, contract, names=(self.name,))
         return obj
 
 
@@ -26,17 +30,26 @@ class NutilsCase(HifiCase):
     """Case class specialized for using Nutils as a backend."""
 
     domain: object
+    geometry_func: ParameterDependent
 
     def __init__(self, name, domain):
         super().__init__(name)
         self.domain = domain
+
+    @property
+    def geometry(self):
+        return partial(self.geometry_func, self)
+
+    @geometry.setter
+    def geometry(self, value):
+        self.geometry_func = value
 
     def sparse_integrate(self, itg, basisnames):
         with matrix.Scipy():
             retval = self.domain.integrate(itg, ischeme='gauss9')
         if isinstance(retval, matrix.Matrix):
             retval = retval.core
-        return NamedBlock(basisnames, retval)
+        return FlexArray((basisnames, retval))
 
     def project_function(self, func, basisname, mu=None):
         if mu is None:
@@ -45,7 +58,7 @@ class NutilsCase(HifiCase):
         basis = self.basis(basisname, mu)
         with matrix.Scipy():
             lift = self.domain.project(func, onto=basis, geometry=geom, ischeme='gauss9')
-        return NamedBlock(basisname, lift)
+        return FlexArray.vector(basisname, lift)
 
     def constrain(self, basisname, *boundaries, component=None, mu=None):
         if len(boundaries) == 1 and isinstance(boundaries[0], np.ndarray):
@@ -74,13 +87,12 @@ class NutilsIntegrand(ParameterDependent):
 
     def __init__(self, case, basisnames, **kwargs):
         bases = [case.bases[name] for name in basisnames]
-        shape = tuple(len(basis) for basis in bases)
         dependencies = dependency_union(case.geometry_func, *bases)
-        super().__init__(shape, dependencies, **kwargs)
+        super().__init__(len(bases), dependencies, **kwargs)
         self.basisnames = basisnames
 
     def contract_and_integrate(self, case, itg, contract, geom):
-        itg, names = apply_contraction(itg, self.basisnames, contract)
+        itg, names = apply_contraction(itg, contract, names=self.basisnames)
         return case.sparse_integrate(itg * fn.J(geom), names)
 
 

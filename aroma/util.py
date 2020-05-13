@@ -1,11 +1,13 @@
-from functools import partial
 from collections import namedtuple
-from itertools import chain
+from functools import partial
+from itertools import chain, product
+from operator import attrgetter
+from typing import List, Dict
 
 import filebacked
 import numpy as np
 from numpy import newaxis as _
-import scipy.sparse as sparse
+import scipy.sparse
 
 
 SCALARS = (
@@ -34,7 +36,7 @@ def broadcast_shapes(args):
     return tuple(result)
 
 
-def apply_contraction(obj, names, contract):
+def apply_contraction(obj, contract, names=None):
     """Apply a contraction over a multidimensional array-like object.
 
     The contraction must be a tuple of either None (no contraction) or
@@ -43,10 +45,8 @@ def apply_contraction(obj, names, contract):
     """
 
     axes = []
-    newnames = []
-    for i, (name, cont) in enumerate(zip(names, contract)):
+    for i, cont in enumerate(contract):
         if cont is None:
-            newnames.append(name)
             continue
         assert cont.ndim == 1
         for __ in range(i):
@@ -55,7 +55,14 @@ def apply_contraction(obj, names, contract):
             cont = cont[...,_]
         obj = obj * cont
         axes.append(i)
-    return obj.sum(tuple(axes)), tuple(newnames)
+
+    obj = obj.sum(tuple(axes))
+
+    if names is not None:
+        newnames = tuple(name for name, cont in zip(names, contract) if cont is None)
+        return obj, newnames
+    else:
+        return obj
 
 
 def tuple_union(tuples):
@@ -92,81 +99,185 @@ class StringlyFileBacked(filebacked.FileBackedBase):
         self.__dict__.update(obj.__dict__)
 
 
-class NamedBlock:
-
-    def __init__(self, names, obj):
-        self.names = names
-        self.obj = obj
+class ZeroSentinel:
 
     @property
     def T(self):
-        return NamedBlock(self.names[::-1], self.obj.T)
-
-
-class NamedBlocks:
-
-    def __init__(self, names, fill=0.0):
-        self.fill = fill
-        self.name_to_index = [
-            {name: i for i, (name, _) in enumerate(namespec)}
-            for namespec in names
-        ]
-        self.index_to_size = [
-            [length for (_, length) in namespec]
-            for namespec in names
-        ]
-
-        s = tuple(len(sizes) for sizes in self.index_to_size)
-        self.blocks = np.zeros(tuple(len(sizes) for sizes in self.index_to_size), dtype=object)
-
-    def __getitem__(self, key):
-        index = tuple(self.name_to_index[i][k] for i, k in enumerate(key))
-        return self.blocks[index]
-
-    def __setitem__(self, key, value):
-        index = tuple(self.name_to_index[i][k] for i, k in enumerate(key))
-        self.blocks[index] = value
-
-    def __iadd__(self, block):
-        assert isinstance(block, NamedBlock)
-        self[block.names] += block.obj
         return self
-
-    def substitute_zeros(self, func):
-        for index, v in np.ndenumerate(self.blocks):
-            if isinstance(v, int) and v == 0:
-                shape = tuple(self.index_to_size[i][j] for i, j in enumerate(index))
-                self.blocks[index] = func(shape)
-
-    def realize(self):
-        # Sparse path
-        if any(isinstance(elt, sparse.spmatrix) for elt in self.blocks.flat):
-            assert self.fill == 0
-            self.substitute_zeros(sparse.coo_matrix)
-            return sparse.bmat(self.blocks, format='csr')
-
-        # Dense path
-        self.substitute_zeros(partial(np.full, fill_value=self.fill))
-        return np.block(self.blocks.tolist())
-
-
-class COOSparse(sparse.coo_matrix):
-    """Subclass of Scipy's COO sparse matrix that supports addition."""
-
-    def __add__(self, other):
-        if not isinstance(other, COOSparse):
-            return super().__add__(other)
-        assert self.shape == other.shape
-        newdata = np.concatenate((self.data, other.data))
-        newrow = np.concatenate((self.row, other.row))
-        newcol = np.concatenate((self.col, other.col))
-        return COOSparse((newdata, (newrow, newcol)), shape=self.shape)
 
     def __iadd__(self, other):
-        if not isinstance(other, COOSparse):
-            return super().__add__(other)
-        assert self.shape == other.shape
-        self.data = np.concatenate((self.data, other.data))
-        self.row = np.concatenate((self.row, other.row))
-        self.col = np.concatenate((self.col, other.col))
+        return other
+
+zero_sentinel = ZeroSentinel()
+
+
+class FlexArray:
+
+    # An array of object dtype holding all the blocks, or the zero
+    # integer if no data
+    blocks: np.ndarray
+
+    # A dictionary holding the length of each known block by name
+    sizes: Dict[str, int]
+
+    # A list holding the numerical block index of each named block on
+    # each axis, e.g. if axis_indices[3]['a'] == 1 then data for block
+    # 'a' on the fourth axis is stored in index 1
+    axis_indices: List[Dict[str, int]]
+
+    def __init__(self, *components, ndim=None):
+        # If any components are given, determine number of dimensions
+        # automatically
+        if components:
+            ndim = len(components[0][0])
+
+        # Initialize data structures
+        self.blocks = np.full((0,) * ndim, zero_sentinel, dtype=object)
+        self.sizes = dict()
+        self.axis_indices = [dict() for _ in range(ndim)]
+
+        # Iteratively add-in each component
+        for index, value in components:
+            self.add_component(index, value)
+
+    @classmethod
+    def vector(cls, name, value):
+        return cls(((name,), value))
+
+    @classmethod
+    def raw(cls, blocks, sizes, indices):
+        newobj = cls.__new__(cls)
+        newobj.blocks = blocks
+        newobj.sizes = sizes
+        newobj.axis_indices = indices
+        return newobj
+
+    def compatible(self, blocknames, array):
+        indexranges = []
+        for names in blocknames:
+            previous, ranges = 0, []
+            for name in names:
+                ranges.append(np.arange(previous, previous + self.sizes[name]))
+                previous += self.sizes[name]
+            indexranges.append(ranges)
+
+        blockshape = tuple(len(names) for names in blocknames)
+        newblocks = np.full(blockshape, zero_sentinel, dtype=object)
+        for blockindex in np.ndindex(newblocks.shape):
+            ranges = (indexranges[axis][j] for axis, j in enumerate(blockindex))
+            newblocks[blockindex] = array[np.ix_(*ranges)]
+
+        newindices = [{name: i for i, name in enumerate(names)} for names in blocknames]
+        return type(self).raw(newblocks, self.sizes.copy(), newindices)
+
+    @property
+    def ndim(self):
+        return self.blocks.ndim
+
+    @property
+    def T(self):
+        if self.ndim == 1:
+            return self
+        newblocks = np.vectorize(attrgetter('T'))(self.blocks.T)
+        newsizes = self.sizes.copy()
+        newindices = [indices.copy() for indices in self.axis_indices[::-1]]
+        return type(self).raw(newblocks, newsizes, newindices)
+
+    def __getitem__(self, names):
+        if isinstance(names, str):
+            names = (names,)
+        index = (indices[name] for name, indices in zip(names, self.axis_indices))
+        retval = self.blocks[tuple(index)]
+        assert retval is not zero_sentinel
+        return retval
+
+    def __iadd__(self, other):
+        if not isinstance(other, FlexArray):
+            return NotImplemented
+        assert self.ndim == other.ndim
+        for name, value in other.items():
+            self.add_component(name, value)
         return self
+
+    def __isub__(self, other):
+        if not isinstance(other, FlexArray):
+            return NotImplemented
+        assert self.ndim == other.ndim
+        for name, value in other.items():
+            self.add_component(name, -value)
+        return self
+
+    def items(self):
+        """Iterate over blocks by index and value."""
+        names = [indices.keys() for indices in self.axis_indices]
+        nums = [indices.values() for indices in self.axis_indices]
+        for name, index in zip(product(*names), product(*nums)):
+            value = self.blocks[index]
+            if value is not zero_sentinel:
+                yield name, value
+
+    def add_component(self, index, value):
+        assert len(index) == self.ndim
+
+        # Calculate the numerical block index axis-by-axis
+        num_index = []
+        for i, (name, length, indices) in enumerate(zip(index, value.shape, self.axis_indices)):
+
+            # Check that the block has the correct size if we've seen
+            # it before, or record the size if not
+            assert self.sizes.setdefault(name, length) == length
+
+            # If this is a new block for this axis, expand the block
+            # arrray and record its index
+            if name not in indices:
+                indices[name] = len(indices)
+                append_shape = self.blocks.shape[:i] + (1,) + self.blocks.shape[i+1:]
+                append_array = np.full(append_shape, zero_sentinel, dtype=object)
+                self.blocks = np.append(self.blocks, append_array, axis=i)
+
+            num_index.append(indices[name])
+
+        # We know the index, so just add it normally
+        self.blocks[tuple(num_index)] += value
+
+    def realize(self, *blocks, lengths=None, sparse=None):
+        """Realize this block array as a true numpy array or scipy matrix."""
+        assert len(blocks) == self.ndim
+
+        # If 'sparse' is not explicitly given, and we have a
+        # two-dimensional block array with at least one sparse
+        # component, return a sparse CSR matrix.  If 'sparse' is given
+        # but does not specify the format, also use CSR.
+        if sparse is None and self.ndim == 2:
+            if any(isinstance(elt, scipy.sparse.spmatrix) for elt in self.blocks.flat):
+                sparse = 'csr'
+            else:
+                sparse = False
+        elif self.ndim != 2:
+            sparse = False
+        elif sparse is True:
+            sparse = 'csr'
+        elif not sparse:
+            sparse = False
+
+        # Optionally verify that lengths are what they should be
+        if lengths is not None:
+            assert all(self.sizes[name] == length for name, length in lengths.items())
+
+        # Build the block list with the correct block numbering
+        block_indices = []
+        for blocklist, indices in zip(blocks, self.axis_indices):
+            block_indices.append(tuple(indices[name] for name in blocklist))
+        reordered_blocks = self.blocks[np.ix_(*block_indices)].copy()
+
+        # Replace zero entries
+        func = scipy.sparse.coo_matrix if sparse else partial(np.full, fill_value=0.0)
+        for index, value in np.ndenumerate(reordered_blocks):
+            if value is zero_sentinel:
+                shape = tuple(self.sizes[blocks[i][j]] for i, j in enumerate(index))
+                reordered_blocks[index] = func(shape)
+
+        # Construct final return value
+        if sparse:
+            return scipy.sparse.bmat(reordered_blocks, format=sparse)
+        return np.block(reordered_blocks.tolist())

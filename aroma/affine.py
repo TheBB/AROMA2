@@ -4,7 +4,7 @@ from typing import Dict, Tuple, Optional
 from filebacked import FileBacked
 import numpy as np
 
-from aroma.util import broadcast_shapes, COOSparse
+from aroma.util import broadcast_shapes, apply_contraction, dependency_union
 from aroma.mufunc import MuFunc
 
 
@@ -15,21 +15,18 @@ class ParameterDependent(FileBacked):
     Subclasses must implement the evaluate method.
     """
 
-    shape: Tuple[int, ...]
+    ndim: int
     dependencies: Tuple[str, ...]
     explicit_scale: Optional[MuFunc]
     cached_contractions: Dict[Tuple[str, ...], ParameterDependent]
 
-    def __init__(self, shape=(), dependencies=(), explicit_scale=None):
+    def __init__(self, ndim=(), dependencies=(), explicit_scale=None):
         super().__init__()
-        self.shape = shape
+        assert isinstance(ndim, int)
+        self.ndim = ndim
         self.dependencies = dependencies
         self.explicit_scale = explicit_scale
         self.cached_contractions = dict()
-
-    @property
-    def ndim(self):
-        return len(self.shape)
 
     def __call__(self, case, mu, contract=None, **kwargs):
         """Evaluate this function at the parametric point mu.
@@ -57,17 +54,9 @@ class ParameterDependent(FileBacked):
             )
         else:
             # Handle contractions manually by evaluating them to vectors
-            contractables = getattr(case, 'contractables', None)
-            if contractables:
-                contract = tuple(
-                    contractables[c](mu, contractables) if isinstance(c, str) else c
-                    for c in contract
-                )
+            contract = tuple(case.contractable(c, mu) if isinstance(c, str) else c for c in contract)
             assert all(not isinstance(c, str) for c in contract)
             retval = self.evaluate(case, mu, contract, **kwargs)
-
-        if isinstance(retval, COOSparse):
-            retval = retval.csr_matrix()
 
         if self.explicit_scale:
             return retval * self.explicit_scale(mu)
@@ -82,6 +71,22 @@ class ParameterDependent(FileBacked):
         output.
         """
         raise NotImplementedError
+
+
+class ParameterConstant(ParameterDependent):
+    """Helper class for wrapping a constant as a ParameterDependent
+    object.
+    """
+
+    obj: object
+
+    def __init__(self, obj, *args, **kwargs):
+        super().__init__(obj.ndim, *args, **kwargs)
+        self.obj = obj
+
+    def evaluate(self, case, mu, contract, **kwargs):
+        return apply_contraction(self.obj, contract)
+
 
 
 class ParameterLambda(ParameterDependent):
@@ -102,29 +107,22 @@ class ParameterLambda(ParameterDependent):
         return self.func(case, mu, contract, **kwargs)
 
 
-class ParameterContainer(ParameterDependent):
-    """A dictionary-like container that wraps multiple named
-    ParameterDependent objects as a sum.
-    """
+class ParameterContractable(ParameterDependent):
 
     data: Dict[str, ParameterDependent]
 
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+        super().__init__(1, *args, **kwargs)
         self.data = dict()
 
     def recompute(self):
-        self.shape = broadcast_shapes(self.values())
-        deps = set()
-        for sub in self.values():
-            deps |= set(sub.dependencies)
-        self.dependencies = deps
+        self.dependencies = dependency_union(*self.data.values())
 
-    def evaluate(self, *args, **kwargs):
-        sub_iter = self.values()
-        retval = next(sub_iter).evaluate(*args, **kwargs)
-        for sub in sub_iter:
-            retval += sub.evaluate(*args, **kwargs)
+    def evaluate(self, case, mu, contract, **kwargs):
+        assert contract == (None,)
+        retval = case.block_assembler()
+        for name, sub in self.data.items():
+            retval[name] = sub.evaluate(case, mu, contract, **kwargs)
         return retval
 
     def __setitem__(self, key, value):
@@ -137,18 +135,6 @@ class ParameterContainer(ParameterDependent):
     def __delitem__(self, key):
         del self.data[key]
         self.recompute()
-
-    def __iter__(self):
-        yield from self.data
-
-    def items(self):
-        yield from self.data.items()
-
-    def keys(self):
-        yield from self.data.keys()
-
-    def values(self):
-        yield from self.data.values()
 
 
 class Basis(ParameterDependent):
@@ -164,7 +150,7 @@ class Basis(ParameterDependent):
         super().__init__(*args, **kwargs)
 
     def __len__(self):
-        return self.shape[0]
+        raise NotImplementedError
 
     @property
     def indices(self):
