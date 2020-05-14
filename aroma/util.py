@@ -117,7 +117,7 @@ class ZeroSentinel:
 zero_sentinel = ZeroSentinel()
 
 
-class FlexArray:
+class FlexArray(filebacked.FileBackedBase):
 
     # An array of object dtype holding all the blocks, or the zero
     # integer if no data
@@ -145,6 +145,28 @@ class FlexArray:
         # Iteratively add-in each component
         for index, value in components:
             self.add_component(index, value)
+
+    def allow_lazy(self):
+        return False
+
+    def write(self, group, **kwargs):
+        super().write(group)
+        group.attrs['ndim'] = self.ndim
+        for name, block in self.items():
+            key = ','.join(name)
+            filebacked.write(group, key, block, **kwargs)
+            group[key].attrs['blocktype'] = 'dense' if isinstance(block, np.ndarray) else 'sparse'
+
+    def _read(self, **kwargs):
+        ndim = self.__filebacked_group__.attrs['ndim']
+        self.__init__(ndim=ndim)
+        for name, subgrp in self.__filebacked_group__.items():
+            index = tuple(name.split(','))
+            if subgrp.attrs['blocktype'] == 'dense':
+                value = filebacked.read(subgrp, np.ndarray, **kwargs)
+            else:
+                value = filebacked.read(subgrp, scipy.sparse.spmatrix, **kwargs)
+            self.add_component(name, value)
 
     @classmethod
     def vector(cls, name, value):

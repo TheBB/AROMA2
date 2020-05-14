@@ -5,7 +5,7 @@ from typing import Optional, Dict
 from filebacked import FileBacked, FileBackedDict
 import numpy as np
 
-from aroma.affine import ParameterDependent, ParameterContractable, Basis
+from aroma.affine import ParameterDependent, ParameterConstant, Basis
 from aroma.mufunc import MuFunc
 from aroma.util import FlexArray
 
@@ -123,12 +123,12 @@ class Case(FileBacked):
 
 class HifiCase(Case):
 
-    contractables: Dict[str, ParameterContractable]
+    contractables: Dict[str, ParameterDependent]
 
     def __init__(self, name):
         super().__init__(name)
         self.contractables = dict()
-        self.contractables['lift'] = ParameterContractable()
+        self.contractables['lift'] = ParameterConstant(FlexArray(ndim=1))
 
     def contractable(self, path, mu):
         func = self.contractables

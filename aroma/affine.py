@@ -4,7 +4,7 @@ from typing import Dict, Tuple, Optional
 from filebacked import FileBacked
 import numpy as np
 
-from aroma.util import broadcast_shapes, dependency_union
+from aroma.util import broadcast_shapes, dependency_union, FlexArray
 from aroma.mufunc import MuFunc
 
 
@@ -78,10 +78,11 @@ class ParameterConstant(ParameterDependent):
     object.
     """
 
-    obj: object
+    obj: FlexArray
 
     def __init__(self, obj, *args, **kwargs):
         super().__init__(obj.ndim, *args, **kwargs)
+        assert isinstance(obj, FlexArray)
         self.obj = obj
 
     def evaluate(self, case, mu, contract, **kwargs):
@@ -104,36 +105,6 @@ class ParameterLambda(ParameterDependent):
 
     def evaluate(self, case, mu, contract, **kwargs):
         return self.func(case, mu, contract, **kwargs)
-
-
-class ParameterContractable(ParameterDependent):
-
-    data: Dict[str, ParameterDependent]
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(1, *args, **kwargs)
-        self.data = dict()
-
-    def recompute(self):
-        self.dependencies = dependency_union(*self.data.values())
-
-    def evaluate(self, case, mu, contract, **kwargs):
-        assert contract == (None,)
-        retval = case.block_assembler()
-        for name, sub in self.data.items():
-            retval[name] = sub.evaluate(case, mu, contract, **kwargs)
-        return retval
-
-    def __setitem__(self, key, value):
-        self.data[key] = value
-        self.recompute()
-
-    def __getitem__(self, key):
-        return self.data[key]
-
-    def __delitem__(self, key):
-        del self.data[key]
-        self.recompute()
 
 
 class Basis(ParameterDependent):
