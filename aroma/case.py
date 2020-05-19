@@ -53,6 +53,11 @@ class Parameters(FileBackedDict[str, Parameter]):
             index += 1
         return retval
 
+    def ranges(self):
+        for name, param in self.items():
+            if param.fixed is None:
+                yield (name, (param.minimum, param.maximum))
+
 
 class Bases(FileBackedDict[str, Basis]):
 
@@ -74,7 +79,7 @@ class Case(FileBacked):
     parameters: Parameters
     bases: Bases
     functions: Dict[str, ParameterDependent]
-    constraints: np.ndarray
+    constraints: FlexArray
 
     def __init__(self, name):
         super().__init__()
@@ -98,8 +103,11 @@ class Case(FileBacked):
         try:
             return self.constraints
         except AttributeError:
-            self.constraints = np.full((self.ndofs,), np.nan)
-            return self.constraints
+            cons = FlexArray(ndim=1)
+            for name, basis in self.bases.items():
+                cons += FlexArray.vector(name, np.full((len(basis),), np.nan))
+            self.constraints = cons
+            return cons
 
     @cons.setter
     def cons(self, value):
@@ -107,8 +115,7 @@ class Case(FileBacked):
 
     def constrain(self, basisname, vector):
         cons = self.cons
-        I = self.bases[basisname].indices
-        cons[I] = np.where(np.isnan(cons[I]), vector, cons[I])
+        cons[basisname] = np.where(np.isnan(cons[basisname]), vector, cons[basisname])
 
     def __contains__(self, name):
         return name in self.functions

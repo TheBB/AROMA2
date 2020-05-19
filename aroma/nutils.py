@@ -55,9 +55,27 @@ class NutilsCase(HifiCase):
     def geometry(self, value):
         self.geometry_func = value
 
+    @property
+    def sampler(self):
+        return self.domain.sample('bezier', degree=2)
+
+    def triangulation(self):
+        return self.sampler.tri
+
+    def discretized_geometry(self, mu):
+        geom = self.geometry(mu)
+        return self.sampler.eval(geom)
+
+    def discretized(self, mu, lhs, basisname, lift=True):
+        if lift:
+            lhs = lhs + self.contractable('lift', mu)
+        basis = self.basis(basisname, mu)
+        solution = basis.dot(lhs[basisname])
+        return self.sampler.eval(solution)
+
     def sparse_integrate(self, itg, basisnames):
         with matrix.Scipy():
-            retval = self.domain.integrate(itg, ischeme='gauss9')
+            retval = self.domain.integrate(itg, ischeme='gauss', degree=9)
         if isinstance(retval, matrix.Matrix):
             retval = retval.core
         return FlexArray.single(basisnames, retval)
@@ -68,7 +86,7 @@ class NutilsCase(HifiCase):
         geom = self.geometry(mu)
         basis = self.basis(basisname, mu)
         with matrix.Scipy():
-            lift = self.domain.project(func, onto=basis, geometry=geom, ischeme='gauss9')
+            lift = self.domain.project(func, onto=basis, geometry=geom, ischeme='gauss', degree=9)
         return FlexArray.vector(basisname, lift)
 
     def constrain(self, basisname, *boundaries, component=None, mu=None):
@@ -87,7 +105,7 @@ class NutilsCase(HifiCase):
             zero = zero[...,component]
 
         with matrix.Scipy():
-            projected = boundary.project(zero, onto=basis, geometry=geom, ischeme='gauss2')
+            projected = boundary.project(zero, onto=basis, geometry=geom, ischeme='gauss', degree=2)
         super().constrain(basisname, projected)
 
 

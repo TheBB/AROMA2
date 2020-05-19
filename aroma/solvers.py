@@ -6,9 +6,10 @@ from nutils import matrix
 from aroma.util import FlexArray
 
 
-def solve(fmx, frhs, cons, names, solver='direct', **kwargs):
+def solve(fmx, frhs, fcons, names, solver='direct', **kwargs):
     mx = fmx.realize(names, names)
     rhs = frhs.realize(names)
+    cons = fcons.realize(names)
 
     if solver == 'mkl':
         if isinstance(mx, np.ndarray):
@@ -32,7 +33,7 @@ def solve(fmx, frhs, cons, names, solver='direct', **kwargs):
     return fmx.compatible((names,), retval)
 
 
-def stokes(case, mu, lift='lift'):
+def stokes(mu, case, lift='lift'):
     assert 'laplacian' in case
     assert 'divergence' in case
 
@@ -47,3 +48,12 @@ def stokes(case, mu, lift='lift'):
     rhs -= case['divergence'](mu, contract=(lift, None))
 
     return solve(mx, rhs, case.cons, ('v', 'p'))
+
+
+def supremizer(mu, rhs, case):
+    assert 'laplacian' in case
+    assert 'divergence' in case
+
+    mx = case['v-h1s'](mu)
+    rhs = case['divergence'](mu, contract=(None, rhs))
+    return solve(mx, rhs, case.cons, ('v',))
