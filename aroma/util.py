@@ -255,6 +255,14 @@ class FlexArray(filebacked.FileBackedBase):
         index = tuple(next(iter(indices.keys())) for indices in self.axis_indices)
         return self.blocks.flat[0], index
 
+    def __contains__(self, names):
+        """Check that the array explicitly contains a block."""
+        if isinstance(names, str):
+            names = (names,)
+        index = (indices[name] for name, indices in zip(names, self.axis_indices))
+        retval = self.blocks[tuple(index)]
+        return retval is not zero_sentinel
+
     def __getitem__(self, names):
         """Get a block by index."""
         if isinstance(names, str):

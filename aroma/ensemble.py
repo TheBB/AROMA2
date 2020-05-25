@@ -30,19 +30,24 @@ class EnsembleBuilder(filebacked.FileBacked):
             assert len(self.snapshots) == len(self.quadrature)
             self.quadrature.append(mu, weight)
         assert len(self.snapshots) < len(self.quadrature)
+        assert lhs.ndim == 1
         self.snapshots.append(lhs)
 
     def finalize(self):
         assert len(self.snapshots) == len(self.quadrature)
-        return Ensemble(self.quadrature, np.array(self.snapshots))
+        snapshots = {
+            key: np.array([snap[key] for snap in self.snapshots])
+            for (key,) in self.snapshots[0].keys()
+        }
+        return Ensemble(self.quadrature, snapshots)
 
 
 class Ensemble(filebacked.FileBacked):
 
     quadrature: Quadrature
-    snapshots: np.ndarray
+    snapshots: Dict[str, np.ndarray]
 
-    def __init__(self, quadrature, snapshots=None):
+    def __init__(self, quadrature, snapshots):
         super().__init__()
         self.quadrature = quadrature
         self.snapshots = snapshots
@@ -57,6 +62,17 @@ class Ensemble(filebacked.FileBacked):
 
     def map(self, func, builder=EnsembleBuilder, name='snapshot', **kwargs):
         builder = builder(self.quadrature)
-        for mu, arg in log.iter.plain(name, zip(builder, self.snapshots)):
+        for mu, arg in log.iter.plain(name, zip(builder, self)):
             builder.append(func(mu, arg, **kwargs))
         return builder.finalize()
+
+    def __len__(self):
+        return len(next(self.snapshots.iter()))
+
+    def __getitem__(self, key):
+        if isinstance(key, str):
+            return self.snapshots[key]
+        retval = FlexArray(ndim=1)
+        for name, data in self.snapshots.items():
+            retval.add_component((name,), data[key])
+        return retval
