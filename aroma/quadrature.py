@@ -5,7 +5,6 @@ import numpy as np
 from numpy.polynomial.legendre import leggauss
 
 from aroma.case import Parameters
-from aroma.util import FlexArray
 
 
 class Quadrature(filebacked.FileBacked):

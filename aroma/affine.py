@@ -2,9 +2,10 @@ from __future__ import annotations
 from typing import Dict, Tuple, Optional
 
 from filebacked import FileBacked
+from flexarrays import FlexArray
 import numpy as np
 
-from aroma.util import broadcast_shapes, dependency_union, FlexArray
+from aroma.util import broadcast_shapes, dependency_union
 from aroma.mufunc import MuFunc
 
 
@@ -87,6 +88,13 @@ class ParameterConstant(ParameterDependent):
 
     def evaluate(self, case, mu, contract, **kwargs):
         return self.obj.contract_many(contract)
+
+    @property
+    def basisnames(self):
+        subnames = self.obj.names
+        # TODO: Remove this requirement. See reduction.Reducer.__call__
+        assert all(len(axis) == 1 for axis in subnames)
+        return tuple(axis[0] for axis in subnames)
 
 
 class ParameterLambda(ParameterDependent):

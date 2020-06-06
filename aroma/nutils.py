@@ -1,21 +1,30 @@
 from functools import partial
 from typing import Tuple
 
+from flexarrays import FlexArray
+import flexarrays
 import numpy as np
 from nutils import matrix, function as fn
 
 from aroma.affine import ParameterDependent, Basis
 from aroma.case import HifiCase
-from aroma.util import contract_helper, dependency_union, FlexArray
+from aroma.util import dependency_union
 
 
-@contract_helper.register(fn.Array)
-def _(obj, contract, axis):
-    newshape = [1] * obj.ndim
-    newshape[axis] = len(contract)
-    contract = contract.reshape(newshape)
-    obj = (obj * contract).sum((axis,))
+@flexarrays.copy.register(fn.Array)
+def _(obj):
     return obj
+
+@flexarrays.transpose.register(fn.Array)
+def _(obj, perm):
+    return obj.transpose(perm)
+
+@flexarrays.contract.register(fn.Array, np.ndarray, int)
+def _(a, b, axis):
+    assert b.ndim == 1
+    b = b.reshape(tuple(1 if i != axis else -1 for i in range(a.ndim)))
+    retval = (a * b).sum(axis)
+    return retval
 
 
 class NutilsBasis(Basis):
@@ -123,7 +132,7 @@ class NutilsIntegrand(ParameterDependent):
     def contract_and_integrate(self, case, itg, contract, geom):
         itg = FlexArray.single(self.basisnames, itg)
         itg = itg.contract_many(contract)
-        itg, names = itg.only()
+        names, itg = itg.only()
         return case.sparse_integrate(itg * fn.J(geom), names)
 
 
@@ -152,4 +161,17 @@ class Divergence(NutilsIntegrand):
         vbasis = case.basis(self.basisnames[0], mu)
         pbasis = case.basis(self.basisnames[1], mu)
         itg = -fn.outer(vbasis.div(geom), pbasis)
+        return self.contract_and_integrate(case, itg, contract, geom)
+
+
+class Mass(NutilsIntegrand):
+    """Nutils mass matrix."""
+
+    def __init__(self, case, basisname, **kwargs):
+        super().__init__(case, (basisname, basisname), **kwargs)
+
+    def evaluate(self, case, mu, contract, **kwargs):
+        geom = case.geometry(mu)
+        basis = case.basis(self.basisnames[0], mu)
+        itg = fn.outer(basis)
         return self.contract_and_integrate(case, itg, contract, geom)

@@ -2,10 +2,10 @@ from contextlib import contextmanager
 from typing import Dict, Optional, List
 
 import filebacked
+from flexarrays import FlexArray
 import numpy as np
 from nutils import log
 
-from aroma.util import FlexArray
 from aroma.quadrature import Quadrature
 
 
@@ -74,5 +74,5 @@ class Ensemble(filebacked.FileBacked):
             return self.snapshots[key]
         retval = FlexArray(ndim=1)
         for name, data in self.snapshots.items():
-            retval.add_component((name,), data[key])
+            retval.add(name, data[key])
         return retval

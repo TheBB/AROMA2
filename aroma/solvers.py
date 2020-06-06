@@ -1,15 +1,14 @@
+from flexarrays import FlexArray, R
 import scipy
 import scipy.sparse as sparse
 import numpy as np
 from nutils import matrix
 
-from aroma.util import FlexArray
-
 
 def solve(fmx, frhs, fcons, names, solver='direct', **kwargs):
-    mx = fmx.realize(names, names)
-    rhs = frhs.realize(names)
-    cons = fcons.realize(names)
+    mx = fmx.realize[names, names]
+    rhs = frhs.realize[names]
+    cons = fcons.realize[names]
 
     if solver == 'mkl':
         if isinstance(mx, np.ndarray):
@@ -30,7 +29,7 @@ def solve(fmx, frhs, fcons, names, solver='direct', **kwargs):
         mx = matrix.ScipyMatrix(mx, scipy)
         retval = mx.solve(rhs, constrain=cons, solver=solver, **kwargs)
 
-    return fmx.compatible((names,), retval)
+    return fmx.compatible(names, retval)
 
 
 def stokes(mu, case, lift='lift'):
@@ -47,7 +46,7 @@ def stokes(mu, case, lift='lift'):
     rhs -= case['laplacian'](mu, contract=(None, lift))
     rhs -= case['divergence'](mu, contract=(lift, None))
 
-    return solve(mx, rhs, case.cons, ('v', 'p'))
+    return solve(mx, rhs, case.cons, R['v','p'])
 
 
 def supremizer(mu, rhs, case):
@@ -56,4 +55,4 @@ def supremizer(mu, rhs, case):
 
     mx = case['v-h1s'](mu)
     rhs = case['divergence'](mu, contract=(None, rhs))
-    return solve(mx, rhs, case.cons, ('v',))
+    return solve(mx, rhs, case.cons, R['v'])

@@ -3,11 +3,11 @@ from itertools import chain
 from typing import Optional, Dict
 
 from filebacked import FileBacked, FileBackedDict
+from flexarrays import FlexArray
 import numpy as np
 
 from aroma.affine import ParameterDependent, ParameterConstant, Basis
 from aroma.mufunc import MuFunc
-from aroma.util import FlexArray
 
 
 class Parameter(FileBacked):
