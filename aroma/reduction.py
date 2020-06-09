@@ -25,7 +25,7 @@ class PODBasis:
             return self._eigvals[:ndofs], self._eigvecs[:,:ndofs]
         src = self.source
 
-        mass = case[self.norm](mu)[src, src]
+        mass = case.functions[self.norm](case, mu)[src, src]
         data = self.ensemble[src]
         nsnaps = len(data)
 
@@ -84,28 +84,16 @@ class Reducer:
             for name, basis in self.bases.items()
         }
 
-        for name, itg in self.case.functions.items():
-            contracts = []
-            for axis in range(itg.ndim):
-                # The following assumes that functions and
-                # contractables are single-blocked, which is almost
-                # always true in practice
-                basisname = itg.basisnames[axis]
-                axis_contracts = list(map(ProjBasis, self._derived_bases(basisname)))
-                if axis in self._get_liftspec(name):
+        for name, blocks in self.case.functions.items():
+            for block, func in blocks.items():
+                contracts = []
+                for basisname in block:
+                    axis_contracts = list(map(ProjBasis, self._derived_bases(basisname)))
                     axis_contracts.extend([
-                        Contractable(cname) for cname, citg in self.case.contractables.items()
-                        if basisname == citg.basisnames[0]
+                        Contractable(cname)
+                        for cname, cfunc in self.case.contractables.items()
+                        if (basisname,) in cfunc
                     ])
-                contracts.append(axis_contracts)
+                    contracts.append(axis_contracts)
 
-            print(name, contracts)
-
-        # for name, itg in self.case.functions.items():
-        #     # Compute all possible project-lift combinations needed
-        #     contracts = []
-        #     for axis in range(itg.ndim):
-        #         axis_contracts = [projections[name] for name in self._derived_bases(itg.basisnames[axis])]
-        #         if axis in self._get_liftspec(name):
-        #             axis_contracts.append('lift')
-        #         contracts.append(axis_contracts)
+                print(name, block, contracts)

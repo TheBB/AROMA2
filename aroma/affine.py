@@ -1,12 +1,25 @@
 from __future__ import annotations
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, Union
 
 from filebacked import FileBacked
-from flexarrays import FlexArray
+from flexarrays import FlexArray, zero_sentinel
 import numpy as np
+import scipy.sparse as sparselib
 
 from aroma.util import broadcast_shapes, dependency_union
 from aroma.mufunc import MuFunc
+
+
+class ParametrizedFlexArray(FlexArray):
+
+    def __call__(self, case, mu, block=None, **kwargs):
+        retval = FlexArray()
+        if block is not None:
+            retval += self[block](case, mu, block=block, **kwargs)
+        else:
+            for index, func in self.items():
+                retval += func(case, mu, block=index, **kwargs)
+        return retval
 
 
 class ParameterDependent(FileBacked):
@@ -16,18 +29,21 @@ class ParameterDependent(FileBacked):
     Subclasses must implement the evaluate method.
     """
 
-    ndim: int
+    shape: Tuple[int, ...]
     dependencies: Tuple[str, ...]
     explicit_scale: Optional[MuFunc]
     cached_contractions: Dict[Tuple[str, ...], ParameterDependent]
 
-    def __init__(self, ndim=(), dependencies=(), explicit_scale=None):
+    def __init__(self, shape=(), dependencies=(), explicit_scale=None):
         super().__init__()
-        assert isinstance(ndim, int)
-        self.ndim = ndim
+        self.shape = shape
         self.dependencies = dependencies
         self.explicit_scale = explicit_scale
         self.cached_contractions = dict()
+
+    @property
+    def ndim(self):
+        return len(self.shape)
 
     def __call__(self, case, mu, contract=None, **kwargs):
         """Evaluate this function at the parametric point mu.
@@ -55,7 +71,10 @@ class ParameterDependent(FileBacked):
             )
         else:
             # Handle contractions manually by evaluating them to vectors
-            contract = tuple(case.contractable(c, mu) if isinstance(c, str) else c for c in contract)
+            contract = tuple(
+                case.contractables[c](case, mu) if isinstance(c, str) else c
+                for c in contract
+            )
             assert all(not isinstance(c, str) for c in contract)
             retval = self.evaluate(case, mu, contract, **kwargs)
 
@@ -79,22 +98,21 @@ class ParameterConstant(ParameterDependent):
     object.
     """
 
-    obj: FlexArray
+    obj: Union[np.ndarray, sparselib.spmatrix]
 
-    def __init__(self, obj, *args, **kwargs):
-        super().__init__(obj.ndim, *args, **kwargs)
-        assert isinstance(obj, FlexArray)
+    def __init__(self, obj, **kwargs):
+        super().__init__(obj.shape, **kwargs)
         self.obj = obj
 
-    def evaluate(self, case, mu, contract, **kwargs):
-        return self.obj.contract_many(contract)
+    def evaluate(self, case, mu, contract, block, **kwargs):
+        return FlexArray.single(block, self.obj).contract_many(contract)
 
-    @property
-    def basisnames(self):
-        subnames = self.obj.names
-        # TODO: Remove this requirement. See reduction.Reducer.__call__
-        assert all(len(axis) == 1 for axis in subnames)
-        return tuple(axis[0] for axis in subnames)
+
+def constant(array: FlexArray, **kwargs):
+    retval = ParametrizedFlexArray()
+    for index, value in array.items():
+        retval.add(index, ParameterConstant(value, **kwargs))
+    return retval
 
 
 class ParameterLambda(ParameterDependent):

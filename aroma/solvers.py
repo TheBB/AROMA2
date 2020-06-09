@@ -33,26 +33,22 @@ def solve(fmx, frhs, fcons, names, solver='direct', **kwargs):
 
 
 def stokes(mu, case, lift='lift'):
-    assert 'laplacian' in case
-    assert 'divergence' in case
+    # assert 'system' in case
 
-    mx = FlexArray(ndim=2)
-    mx += case['laplacian'](mu)
-    divergence = case['divergence'](mu)
-    mx += divergence
-    mx += divergence.T
+    mx = case.functions['system'](case, mu)
+    mx += mx[~R['p'], 'p'].T
 
     rhs = FlexArray(ndim=1)
-    rhs -= case['laplacian'](mu, contract=(None, lift))
-    rhs -= case['divergence'](mu, contract=(lift, None))
+    rhs -= case.functions['system'](case, mu, block=('v','v'), contract=(None, lift))
+    rhs -= case.functions['system'](case, mu, block=('v','p'), contract=(lift, None))
 
     return solve(mx, rhs, case.cons, R['v','p'])
 
 
 def supremizer(mu, rhs, case):
-    assert 'laplacian' in case
-    assert 'divergence' in case
+    # assert 'system' in case
+    # assert 'v-h1s' in case
 
-    mx = case['v-h1s'](mu)
-    rhs = case['divergence'](mu, contract=(None, rhs))
+    mx = case.functions['v-h1s'](case, mu)
+    rhs = case.functions['system'](case, mu, block=('v','p'), contract=(None, rhs))
     return solve(mx, rhs, case.cons, R['v'])

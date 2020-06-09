@@ -1,3 +1,4 @@
+from collections import defaultdict
 from functools import partial, lru_cache
 from itertools import chain
 from typing import Optional, Dict
@@ -6,7 +7,7 @@ from filebacked import FileBacked, FileBackedDict
 from flexarrays import FlexArray
 import numpy as np
 
-from aroma.affine import ParameterDependent, ParameterConstant, Basis
+from aroma.affine import ParametrizedFlexArray, ParameterConstant, Basis
 from aroma.mufunc import MuFunc
 
 
@@ -78,7 +79,7 @@ class Case(FileBacked):
     name: str
     parameters: Parameters
     bases: Bases
-    functions: Dict[str, ParameterDependent]
+    functions: Dict[str, ParametrizedFlexArray]
     constraints: FlexArray
 
     def __init__(self, name):
@@ -86,7 +87,7 @@ class Case(FileBacked):
         self.name = name
         self.parameters = Parameters()
         self.bases = Bases()
-        self.functions = dict()
+        self.functions = defaultdict(ParametrizedFlexArray)
 
     def parameter(self, *args, **kwargs):
         return self.parameters.parameter(*args, **kwargs)
@@ -117,28 +118,28 @@ class Case(FileBacked):
         cons = self.cons
         cons[basisname] = np.where(np.isnan(cons[basisname]), vector, cons[basisname])
 
-    def __contains__(self, name):
-        return name in self.functions
+    # def __contains__(self, name):
+    #     return name in self.functions
 
-    @lru_cache
-    def __getitem__(self, name):
-        return partial(self.functions[name], self)
+    # def __getitem__(self, name):
+    #     return self.functions.setdefault(name, ParameterBlockDict())
 
-    def __setitem__(self, name, value):
-        self.functions[name] = value
+    # def __setitem__(self, name, value):
+    #     self.functions[name] = value
+
+    # def __call__(self, name, mu, block=None, **kwargs):
+    #     func = self.functions[name]
+    #     return func(self, mu, block, **kwargs)
 
 
 class HifiCase(Case):
 
-    contractables: Dict[str, ParameterDependent]
+    contractables: Dict[str, ParametrizedFlexArray]
 
     def __init__(self, name):
         super().__init__(name)
-        self.contractables = dict()
-        self.contractables['lift'] = ParameterConstant(FlexArray(ndim=1))
+        self.contractables = defaultdict(partial(ParametrizedFlexArray, ndim=1))
 
-    def contractable(self, path, mu):
-        func = self.contractables
-        for component in path.split('/'):
-            func = func[component]
-        return func(self, mu)
+    # def contractable(self, name, mu, block=None, **kwargs):
+    #     func = self.contractables[name]
+    #     return func(self, mu, block, **kwargs)

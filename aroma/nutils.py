@@ -33,7 +33,7 @@ class NutilsBasis(Basis):
     basis: object
 
     def __init__(self, basis):
-        super().__init__(basis.ndim)
+        super().__init__((len(basis),))
         self.basis = basis
 
     def __len__(self):
@@ -77,17 +77,17 @@ class NutilsCase(HifiCase):
 
     def discretized(self, mu, lhs, basisname, lift=True):
         if lift:
-            lhs = lhs + self.contractable('lift', mu)
+            lhs = lhs + self.contractables['lift'](self, mu)
         basis = self.basis(basisname, mu)
         solution = basis.dot(lhs[basisname])
         return self.sampler.eval(solution)
 
-    def sparse_integrate(self, itg, basisnames):
+    def sparse_integrate(self, itg):
         with matrix.Scipy():
             retval = self.domain.integrate(itg, ischeme='gauss', degree=9)
         if isinstance(retval, matrix.Matrix):
             retval = retval.core
-        return FlexArray.single(basisnames, retval)
+        return retval
 
     def project_function(self, func, basisname, mu=None):
         if mu is None:
@@ -121,47 +121,57 @@ class NutilsCase(HifiCase):
 class NutilsIntegrand(ParameterDependent):
     """Superclass for Nutils integrand objects."""
 
-    basisnames: Tuple[str, ...]
-
     def __init__(self, case, basisnames, **kwargs):
         bases = [case.bases[name] for name in basisnames]
         dependencies = dependency_union(case.geometry_func, *bases)
-        super().__init__(len(bases), dependencies, **kwargs)
-        self.basisnames = basisnames
+        shape = tuple(map(len, bases))
+        super().__init__(shape, dependencies, **kwargs)
 
-    def contract_and_integrate(self, case, itg, contract, geom):
-        itg = FlexArray.single(self.basisnames, itg)
-        itg = itg.contract_many(contract)
-        names, itg = itg.only()
-        return case.sparse_integrate(itg * fn.J(geom), names)
+
+def contract_and_integrate(case, itg, contract, block):
+    itg = FlexArray.single(block, itg)
+    itg = itg.contract_many(contract)
+    names, itg = itg.only()
+    retval = case.sparse_integrate(itg)
+    return FlexArray.single(names, retval)
 
 
 class Laplacian(NutilsIntegrand):
     """Nutils Laplacian matrix."""
 
     def __init__(self, case, basisname, **kwargs):
-        super().__init__(case, (basisname,) * 2, **kwargs)
+        super().__init__(case, (basisname, basisname), **kwargs)
 
-    def evaluate(self, case, mu, contract, **kwargs):
+    def evaluate(self, case, mu, contract, block, **kwargs):
         geom = case.geometry(mu)
-        basis = case.basis(self.basisnames[0], mu)
+        bname, _ = block
+        basis = case.basis(bname, mu)
         itg = fn.outer(basis.grad(geom))
         sum_dims = list(range(2, itg.ndim))
-        return self.contract_and_integrate(case, itg.sum(sum_dims), contract, geom)
+        return contract_and_integrate(case, itg.sum(sum_dims) * fn.J(geom), contract, block)
+
+def laplacian(case, basisname, **kwargs):
+    func = Laplacian(case, basisname, **kwargs)
+    return FlexArray.single((basisname, basisname), func)
 
 
 class Divergence(NutilsIntegrand):
     """Nutils divergence matrix."""
 
-    def __init__(self, case, vbasisname, pbasisname, **kwargs):
-        super().__init__(case, (vbasisname, pbasisname), **kwargs)
+    def __init__(self, case, vname, pname, **kwargs):
+        super().__init__(case, (vname, pname), **kwargs)
 
-    def evaluate(self, case, mu, contract, **kwargs):
+    def evaluate(self, case, mu, contract, block, **kwargs):
         geom = case.geometry(mu)
-        vbasis = case.basis(self.basisnames[0], mu)
-        pbasis = case.basis(self.basisnames[1], mu)
+        vname, pname = block
+        vbasis = case.basis(vname, mu)
+        pbasis = case.basis(pname, mu)
         itg = -fn.outer(vbasis.div(geom), pbasis)
-        return self.contract_and_integrate(case, itg, contract, geom)
+        return contract_and_integrate(case, itg * fn.J(geom), contract, block)
+
+def divergence(case, vname, pname, **kwargs):
+    func = Divergence(case, vname, pname, **kwargs)
+    return FlexArray.single((vname, pname), func)
 
 
 class Mass(NutilsIntegrand):
@@ -170,8 +180,13 @@ class Mass(NutilsIntegrand):
     def __init__(self, case, basisname, **kwargs):
         super().__init__(case, (basisname, basisname), **kwargs)
 
-    def evaluate(self, case, mu, contract, **kwargs):
+    def evaluate(self, case, mu, contract, block, **kwargs):
         geom = case.geometry(mu)
-        basis = case.basis(self.basisnames[0], mu)
+        bname, _ = block
+        basis = case.basis(bname, mu)
         itg = fn.outer(basis)
-        return self.contract_and_integrate(case, itg, contract, geom)
+        return contract_and_integrate(case, itg * fn.J(geom), contract, block)
+
+def mass(case, basisname, **kwargs):
+    func = Mass(case, basisname, **kwargs)
+    return FlexArray.single((basisname, basisname), func)
